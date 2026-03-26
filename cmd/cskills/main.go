@@ -3,14 +3,18 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/choria-io/fisk"
 	"github.com/danielmichaels/cskills"
 	"github.com/danielmichaels/cskills/internal"
 )
+
+var supportedLangs = []string{"go", "rust"}
 
 var version = "dev"
 
@@ -30,7 +34,7 @@ cskills list --lang go
 cskills list --lang rust`)
 	var listLang string
 	listCmd.Flag("lang", "Filter by language: go or rust").
-		EnumVar(&listLang, "go", "rust")
+		EnumVar(&listLang, supportedLangs...)
 	listCmd.Action(func(_ *fisk.ParseContext) error {
 		return runList(listLang)
 	})
@@ -55,8 +59,8 @@ cskills install --lang rust --all --force`)
 	)
 	installCmd.Flag("lang", "Language: go or rust").
 		Required().
-		EnumVar(&installLang, "go", "rust")
-	installCmd.Flag("skill", "Comma-separated skill names to install").
+		EnumVar(&installLang, supportedLangs...)
+	installCmd.Flag("skill", "Comma-separated skill names to install (use 'list' to see available)").
 		StringVar(&installSkill)
 	installCmd.Flag("all", "Install all skills (always + custom)").
 		UnNegatableBoolVar(&installAll)
@@ -70,7 +74,7 @@ cskills install --lang rust --all --force`)
 }
 
 func runList(lang string) error {
-	langs := []string{"go", "rust"}
+	langs := supportedLangs
 	if lang != "" {
 		langs = []string{lang}
 	}
@@ -107,29 +111,29 @@ func runInstall(lang, skillFlag string, all, force bool) error {
 
 	switch {
 	case skillFlag != "":
+		available := skillNames(skills)
 		requested := make(map[string]bool)
-		for _, name := range strings.Split(skillFlag, ",") {
-			requested[strings.TrimSpace(name)] = true
+		for name := range strings.SplitSeq(skillFlag, ",") {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			if !available[name] {
+				return fmt.Errorf("unknown skill %q for %s (available: %s)", name, lang, strings.Join(slices.Sorted(maps.Keys(available)), ", "))
+			}
+			requested[name] = true
 		}
 		for _, s := range skills {
 			if requested[s.Name] {
 				toInstall = append(toInstall, s)
-				delete(requested, s.Name)
 			}
-		}
-		for name := range requested {
-			fmt.Fprintf(os.Stderr, "warning: skill %q not found for %s\n", name, lang)
 		}
 
 	case all:
 		toInstall = skills
 
 	default:
-		for _, s := range skills {
-			if s.Category == "always" {
-				toInstall = append(toInstall, s)
-			}
-		}
+		toInstall = filterByCategory(skills, "always")
 
 		customSkills := filterByCategory(skills, "custom")
 		if len(customSkills) > 0 && isTerminal() {
@@ -155,10 +159,18 @@ func runInstall(lang, skillFlag string, all, force bool) error {
 
 	fmt.Printf("Installing %d skill(s) to %s\n", len(toInstall), targetDir)
 	if err := internal.Install(cskills.SkillsFS, toInstall, targetDir, force); err != nil {
-		return err
+		return fmt.Errorf("installing skills: %w", err)
 	}
 	fmt.Println("done")
 	return nil
+}
+
+func skillNames(skills []internal.Skill) map[string]bool {
+	names := make(map[string]bool, len(skills))
+	for _, s := range skills {
+		names[s.Name] = true
+	}
+	return names
 }
 
 func filterByCategory(skills []internal.Skill, category string) []internal.Skill {
