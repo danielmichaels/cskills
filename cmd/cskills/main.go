@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/choria-io/fisk"
+	"github.com/olekukonko/tablewriter"
 	"github.com/danielmichaels/cskills"
 	"github.com/danielmichaels/cskills/internal"
 )
@@ -88,10 +89,17 @@ func runList(lang string) error {
 			continue
 		}
 
-		fmt.Printf("[%s]\n", l)
+		fmt.Printf("\n[%s]\n", strings.ToUpper(l))
+
+		t := tablewriter.NewWriter(os.Stdout)
+		t.Configure(func(cfg *tablewriter.Config) {
+			cfg.MaxWidth = 100
+		})
+		t.Header("SKILL", "TYPE", "DESCRIPTION")
 		for _, s := range skills {
-			fmt.Printf("  %-20s %-8s %s\n", s.Name, s.Category, s.Description)
+			t.Append([]string{s.Name, s.Category, s.Description})
 		}
+		t.Render()
 		fmt.Println()
 	}
 	return nil
