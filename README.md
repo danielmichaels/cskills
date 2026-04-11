@@ -51,8 +51,9 @@ error: unknown skill "foo" for go (available: datastar, plan-task, research-task
 | Skill | Languages | Category | Description |
 |-------|-----------|----------|-------------|
 | tdd | go, rust | always | Test-driven development practices |
-| plan-task | go, rust | always | Design an implementation plan for a researched task |
 | research-task | go, rust | always | Research a codebase task by exploring code, patterns, and dependencies |
+| plan-task | go, rust | always | Design an implementation plan for a researched task |
+| implement-task | go, rust | always | Execute a planned task by spawning an agent team from todos.md |
 | datastar | go | custom | Best practices for building web apps with the Datastar hypermedia framework |
 
 ### Skill categories

@@ -57,6 +57,43 @@ category: custom
 			wantDesc: "Long description that spans lines.",
 			wantCat:  "custom",
 		},
+		{
+			name: "multiline description with multiple lines",
+			content: `---
+name: huma
+description:
+  Huma REST API framework patterns for Go. Covers route registration,
+  validation tags, error handling, middleware, and testing with humatest.
+category: custom
+---`,
+			wantName: "huma",
+			wantDesc: "Huma REST API framework patterns for Go. Covers route registration, validation tags, error handling, middleware, and testing with humatest.",
+			wantCat:  "custom",
+		},
+		{
+			name: "description with pipe block scalar",
+			content: `---
+name: huma
+description: |
+  Huma REST API framework patterns.
+category: custom
+---`,
+			wantName: "huma",
+			wantDesc: "Huma REST API framework patterns.",
+			wantCat:  "custom",
+		},
+		{
+			name: "description with folded block scalar",
+			content: `---
+name: huma
+description: >
+  Huma REST API framework patterns.
+category: custom
+---`,
+			wantName: "huma",
+			wantDesc: "Huma REST API framework patterns.",
+			wantCat:  "custom",
+		},
 	}
 
 	for _, tt := range tests {

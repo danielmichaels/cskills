@@ -92,6 +92,7 @@ func parseFrontmatter(content []byte) (name, description, category string) {
 
 	frontmatter := string(content[3 : 3+end])
 	var descContinuation bool
+	var descParts []string
 
 	for _, line := range strings.Split(frontmatter, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -101,11 +102,12 @@ func parseFrontmatter(content []byte) (name, description, category string) {
 
 		if descContinuation {
 			if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
-				description = strings.Trim(trimmed, "\" ")
-				descContinuation = false
+				descParts = append(descParts, strings.Trim(trimmed, "\" "))
 				continue
 			}
 			descContinuation = false
+			description = strings.Join(descParts, " ")
+			descParts = nil
 		}
 
 		parts := strings.SplitN(trimmed, ":", 2)
@@ -121,7 +123,7 @@ func parseFrontmatter(content []byte) (name, description, category string) {
 		case "name":
 			name = val
 		case "description":
-			if val == "" {
+			if val == "" || val == "|" || val == ">" {
 				descContinuation = true
 			} else {
 				description = val
@@ -129,6 +131,10 @@ func parseFrontmatter(content []byte) (name, description, category string) {
 		case "category":
 			category = val
 		}
+	}
+
+	if descContinuation {
+		description = strings.Join(descParts, " ")
 	}
 
 	return name, description, category

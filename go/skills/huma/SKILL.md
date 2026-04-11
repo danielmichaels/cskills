@@ -1,13 +1,8 @@
 ---
 name: huma
-description: |
-  Huma REST API framework patterns for Go. Covers route registration, request
-  inputs/outputs, validation tags, error handling (RFC 9457), middleware,
-  security schemes, resolvers, transformers, and testing with humatest.
-  Use this skill whenever writing or modifying huma handlers, routes, middleware,
-  security configuration, input/output structs, or any HTTP endpoint code that
-  uses the huma framework. Also use when the user mentions huma, API handlers,
-  request validation, or OpenAPI generation in a huma context.
+description:
+  Huma REST API framework patterns for Go. Covers route registration, validation tags, error handling (RFC 9457), middleware, security schemes, resolvers, and testing with humatest. Triggers on: huma, API handlers, request validation, OpenAPI generation.
+category: custom
 ---
 
 # Huma Framework Guide
