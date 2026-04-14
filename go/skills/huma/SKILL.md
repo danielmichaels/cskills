@@ -1,7 +1,7 @@
 ---
 name: huma
 description:
-  Huma REST API framework patterns for Go. Covers route registration, validation tags, error handling (RFC 9457), middleware, security schemes, resolvers, and testing with humatest. Triggers on: huma, API handlers, request validation, OpenAPI generation.
+  Huma REST API framework patterns for Go. Covers route registration, validation tags, error handling (RFC 9457), middleware, security schemes, resolvers, response streaming, auto-patch, SSE (Server-Sent Events), and testing with humatest. Triggers on: huma, API handlers, request validation, OpenAPI generation, SSE streaming, PATCH.
 category: custom
 ---
 
@@ -407,6 +407,160 @@ Import CBOR support for content negotiation:
 import _ "github.com/danielgtaylor/huma/v2/formats/cbor"
 ```
 
+## Response Streaming
+
+For streaming responses, return `*huma.StreamResponse` from your handler. The `Body` callback receives a `huma.Context` for writing directly:
+
+```go
+func (app *App) handleStream(ctx context.Context, input *StreamInput) (*huma.StreamResponse, error) {
+    return &huma.StreamResponse{
+        Body: func(ctx huma.Context) {
+            ctx.SetHeader("Content-Type", "text/my-stream")
+            writer := ctx.BodyWriter()
+
+            if d, ok := writer.(interface{ SetWriteDeadline(time.Time) error }); ok {
+                d.SetWriteDeadline(time.Now().Add(5 * time.Second))
+            }
+
+            writer.Write([]byte("chunk one"))
+            if f, ok := writer.(http.Flusher); ok {
+                f.Flush()
+            }
+
+            time.Sleep(1 * time.Second)
+            writer.Write([]byte("chunk two"))
+        },
+    }, nil
+}
+```
+
+### Streaming Rules
+
+1. Set headers **before** writing body content via `ctx.SetHeader()`
+2. Use `ctx.BodyWriter()` to get the underlying `io.Writer`
+3. Cast to `http.Flusher` and call `Flush()` to send buffered data immediately
+4. Use `SetWriteDeadline` to extend per-write timeouts for long-lived streams
+5. For SSE specifically, prefer the `sse` package over manual streaming
+
+## Auto Patch
+
+The `autopatch` package auto-generates `PATCH` operations for any resource that has `GET` + `PUT` but no `PATCH`. Import `github.com/danielgtaylor/huma/v2/autopatch`.
+
+Call `autopatch.AutoPatch(api)` **after** all routes are registered:
+
+```go
+autopatch.AutoPatch(api)
+```
+
+### Supported Patch Formats
+
+| Content-Type | Format | Default |
+|---|---|---|
+| `application/merge-patch+json` | JSON Merge Patch (RFC 7386) | Yes (also used when `application/json` or no Content-Type) |
+| `application/json-patch+json` | JSON Patch (RFC 6902) | No |
+| `application/merge-patch+shorthand` | Shorthand Merge Patch (field paths + array append) | No |
+
+### Conditional Requests
+
+If the `GET` response includes `ETag` or `Last-Modified` headers, AutoPatch forwards them to the `PUT`, preventing distributed write conflicts automatically.
+
+### Disabling Per Resource
+
+Set `"autopatch": false` in operation metadata to exclude a resource:
+
+```go
+huma.Register(api, huma.Operation{
+    OperationID: "get-thing",
+    Method:      http.MethodGet,
+    Path:        "/things/{id}",
+    Metadata:    map[string]any{"autopatch": false},
+}, app.handleGetThing)
+```
+
+## Server-Sent Events (SSE)
+
+The `sse` package provides streaming Server-Sent Events. Import `github.com/danielgtaylor/huma/v2/sse`.
+
+### Event Type Registration
+
+`sse.Register` takes an `eventTypeMap` mapping event names to Go types. Each event type **must be a unique Go type** — use type aliases for shared base structs:
+
+```go
+type UserEvent struct {
+    UserID   int    `json:"user_id"`
+    Username string `json:"username"`
+}
+
+type UserCreatedEvent UserEvent
+type UserDeletedEvent UserEvent
+```
+
+### Registering an SSE Endpoint
+
+```go
+sse.Register(api, huma.Operation{
+    OperationID: "stream-events",
+    Method:      http.MethodGet,
+    Path:        "/events",
+    Summary:     "Stream events",
+}, map[string]any{
+    "message":    DefaultMessage{},
+    "userCreate": UserCreatedEvent{},
+    "userDelete": UserDeletedEvent{},
+}, func(ctx context.Context, input *struct{}, send sse.Sender) {
+    send.Data(DefaultMessage{Message: "connected"})
+    send.Data(UserCreatedEvent{UserID: 1, Username: "foo"})
+})
+```
+
+The handler signature is `func(ctx context.Context, input *I, send sse.Sender)` — input works the same as regular Huma handlers (path/query/header params, validation).
+
+### Sending Messages
+
+**`send.Data(v)`** — sends data with the event type inferred from the Go type's entry in the event map. This is the common path:
+
+```go
+send.Data(UserCreatedEvent{UserID: 1, Username: "foo"})
+```
+
+**`send(sse.Message{...})`** — full control over ID and retry interval. The event type is still inferred from `Data`'s Go type:
+
+```go
+send(sse.Message{
+    ID:    5,
+    Retry: 1000,
+    Data:  UserCreatedEvent{UserID: 1, Username: "foo"},
+})
+```
+
+### SSE Message Fields
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `ID` | `int` | Event ID (sent as `id:` line, omitted when 0) |
+| `Data` | `any` | Payload, JSON-encoded (type determines `event:` name) |
+| `Retry` | `int` | Client reconnect interval in ms (sent as `retry:` line, omitted when 0) |
+
+### Wire Format
+
+The `"message"` event name is the SSE default — Huma omits the `event:` line for it. All other event names are sent explicitly. Data is always JSON-encoded.
+
+### Configuration
+
+`sse.WriteTimeout` controls the per-write deadline (default 5s). Set it before registering endpoints:
+
+```go
+sse.WriteTimeout = 10 * time.Second
+```
+
+### SSE Rules
+
+1. Each event type in the map must be a **distinct Go type** — reuse via type alias (`type X Y`)
+2. The event name is determined by the Go type of `Data`, not by a string field
+3. Flushing is automatic if the adapter's `BodyWriter` implements `http.Flusher`
+4. The response content type is `text/event-stream` with a `200` status
+5. SSE endpoints generate proper OpenAPI schemas with `oneOf` for each event type
+
 ## Key Rules
 
 1. Body fields are **required by default** — use `omitempty` or pointer types for optional fields
@@ -417,3 +571,7 @@ import _ "github.com/danielgtaylor/huma/v2/formats/cbor"
 6. Return all validation failures at once, not one at a time
 7. Use `huma.WriteErr` in middleware (not `huma.ErrorXXX` helpers — those are for handlers)
 8. `huma.ModelValidator` is NOT goroutine-safe — use `huma.Validate` for concurrent use
+
+## Reference
+
+For full API docs (types, functions, interfaces), search https://pkg.go.dev/github.com/danielgtaylor/huma/v2 as needed.
