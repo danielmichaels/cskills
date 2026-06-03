@@ -288,6 +288,62 @@ huma.Register(api, huma.Operation{
 }, app.handleAdminAction)
 ```
 
+### Router-Level vs Huma-Level — When to Use Which
+
+Huma sits on top of a router (chi, gorilla, etc.). Middleware can run **at the router level** (wraps the entire request including any router-side rejections) or **at the Huma level** (runs after the router dispatches to the Huma handler).
+
+Use **router-level** middleware for:
+- Request bracket logging that must capture the final response status (including rejections by other router middleware before Huma is reached)
+- Session cookie management (`scs.LoadAndSave` and similar)
+- CSRF protection / cross-origin checks on browser POSTs
+- Anything that needs `*http.Request` directly (e.g. a status-writer wrapper)
+
+Use **Huma-level** middleware for:
+- Logic that needs `huma.Context` (`ctx.Header(...)`, `ctx.URL()`, etc.)
+- Per-operation gating where you reach for `ctx.Operation().Metadata`
+- Authentication that injects typed values via `huma.WithValue` for handler retrieval
+
+The **logging gotcha**: a logger registered as Huma-native middleware runs *inside* the router's handler. If a router-level middleware rejects the request first (rate limit, missing CSRF token, etc.), the Huma logger never sees it. For "Request Started / Request Finished with status + bytes + duration" brackets, use chi middleware with a status-capture writer wrapper:
+
+```go
+v2.Use(statusCapture)         // wraps ResponseWriter to capture status + bytes
+v2.Use(RequestLogger(logger)) // reads from the wrapped writer at completion
+v2.Use(sessionManager.LoadAndSave)
+api := humachi.New(v2, cfg)
+RegisterRoutes(api)
+```
+
+`statusCapture` must be innermost relative to `RequestLogger` so the logger reads the captured status, but both must be outermost relative to anything that might reject the request, so both fire for every outcome.
+
+### Accessing `*http.Request` in Handlers
+
+Huma handlers receive `context.Context`, not `*http.Request`. For transport-level fields — `RemoteAddr`, `User-Agent`, `X-Forwarded-For`, raw TLS state — useful for audit logs, login attempt records, IP-based rate limits — stash the request into ctx via a router-level middleware:
+
+```go
+type requestKey struct{}
+
+func RequestMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        ctx := context.WithValue(r.Context(), requestKey{}, r)
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+
+func requestFromCtx(ctx context.Context) *http.Request {
+    r, _ := ctx.Value(requestKey{}).(*http.Request)
+    return r
+}
+
+// in a handler:
+func handleLogin(ctx context.Context, in *LoginInput) (*LoginOutput, error) {
+    r := requestFromCtx(ctx)
+    auditIP := r.RemoteAddr
+    // ...
+}
+```
+
+This is a workaround, not a Huma-blessed pattern. When Huma adds a first-class request-unwrap helper this becomes a 3-line removal. Restrict use to handlers that genuinely need transport-level fields; everything else goes through `huma.Context` → `ctx.Header(...)` etc.
+
 ## Security Schemes
 
 Configure OpenAPI security schemes in the huma config:
@@ -317,6 +373,38 @@ Security: []map[string][]string{
 ```
 
 Multiple entries in the slice means OR (any scheme suffices). Multiple keys in one map means AND (all required).
+
+### Session-Cookie Authentication
+
+For session-cookie auth (SCS, gorilla-sessions, any cookie-managed session library), declare an `apiKey in cookie` scheme. The session library owns the cookie at runtime; Huma is purely declarative for OpenAPI:
+
+```go
+const SessionCookieName = "app_session" // shared const
+
+cfg.Components.SecuritySchemes = map[string]*huma.SecurityScheme{
+    "session": {Type: "apiKey", In: "cookie", Name: SessionCookieName},
+}
+```
+
+Reference on operations exactly like other schemes:
+
+```go
+Security: []map[string][]string{{"session": {}}},
+```
+
+**Runtime ownership rules:**
+- Mount the session library's middleware at the **router level** (e.g. `r.Use(sessionManager.LoadAndSave)`), not as Huma middleware — sessions need `*http.Request` and `http.ResponseWriter` directly.
+- Handlers read/write session state via the library's context-based helpers (`scs.GetString(ctx, "user_id")`, etc.) — never via `huma.Context`.
+- Handlers do **not** declare ``SetCookie http.Cookie `header:"Set-Cookie"` `` in Output structs. The session middleware writes/rotates the cookie transparently.
+
+**Cookie-name-as-const**: declare the cookie name once and reference it from both the session manager configuration and the security scheme:
+
+```go
+sm.Cookie.Name = SessionCookieName // session manager config
+// scheme above also references SessionCookieName
+```
+
+Without this, the OpenAPI spec silently drifts from the runtime cookie name when one is changed and the other isn't. Generated clients (TS via openapi-typescript-codegen, etc.) will send the wrong cookie and tests won't catch it because tests don't read the OpenAPI doc.
 
 ## Resolvers
 
@@ -379,6 +467,48 @@ func TestCreateThing(t *testing.T) {
 
 String arguments become headers, any other value becomes the JSON body. Returns `*httptest.ResponseRecorder`.
 
+### Two-Layer Strategy: humatest + httptest
+
+`humatest` constructs the Huma API directly without a router. It exercises:
+- Input/output schema validation
+- Validation tags
+- Error mapping (your handler returning `huma.Error409Conflict` → 409 response)
+- Resolver and transformer logic
+
+It does **not** exercise router-level middleware: session cookie lifecycle, request logging, rate limits, CSRF protection, anything that mutates request context before reaching Huma. Tests written exclusively against humatest can pass while production breaks because the router-level middleware was misconfigured.
+
+For full-chain coverage, use `httptest.NewRecorder` (or `httptest.NewServer`) against your real router with all middleware mounted:
+
+```go
+func newTestRouter(t *testing.T) *chi.Mux {
+    r := chi.NewRouter()
+    r.Group(func(v2 chi.Router) {
+        v2.Use(statusCapture)
+        v2.Use(RequestLogger(testLogger))
+        v2.Use(sessionManager.LoadAndSave)
+        api := humachi.New(v2, cfg)
+        RegisterRoutes(api)
+    })
+    return r
+}
+
+func TestLoginSetsCookie(t *testing.T) {
+    r := newTestRouter(t)
+    body, _ := json.Marshal(map[string]string{"email": "...", "password": "..."})
+    req := httptest.NewRequest(http.MethodPost, "/v2/auth/login", bytes.NewReader(body))
+    req.Header.Set("Content-Type", "application/json")
+    rec := httptest.NewRecorder()
+    r.ServeHTTP(rec, req)
+
+    require.Equal(t, http.StatusOK, rec.Code)
+    require.NotEmpty(t, rec.Result().Cookies(), "login should set session cookie")
+}
+```
+
+**Rule of thumb:**
+- Schema correctness, error codes, input validation → `humatest`
+- Cookie lifecycle, middleware-driven flows, end-to-end behavior → `httptest` against the real router
+
 ## Config and Initialization
 
 ```go
@@ -405,6 +535,48 @@ func setupAPI() huma.API {
 Import CBOR support for content negotiation:
 ```go
 import _ "github.com/danielgtaylor/huma/v2/formats/cbor"
+```
+
+### Gradual Adoption Alongside Existing Routers
+
+Huma can mount inside a sub-router or `chi.Group` without touching the rest of the app. New routes register on Huma; legacy routes stay on bare chi handlers; both serve from the same binary:
+
+```go
+r := chi.NewRouter()
+
+// v1 — existing bare-chi handlers, untouched
+r.Route("/api/v1", func(v1 chi.Router) {
+    v1.Get("/things", legacyListThings)
+    v1.Post("/things", legacyCreateThing)
+})
+
+// v2 — Huma surface, OpenAPI emitted only for /v2/*
+r.Group(func(v2 chi.Router) {
+    v2.Use(sessionManager.LoadAndSave)
+    cfg := huma.DefaultConfig("My API v2", "0.1.0")
+    api := humachi.New(v2, cfg)
+    RegisterRoutes(api)
+})
+```
+
+This is the right shape when migrating an existing service: pay the Huma cost only for new endpoints, and the OpenAPI doc reflects only the migrated surface — stable for downstream code generation while legacy routes are deleted incrementally.
+
+### Auto-Mounted Endpoints
+
+`humachi.New` (and the other adapter constructors) auto-mounts a few paths at the API root:
+
+| Path | Purpose |
+|------|---------|
+| `<root>/openapi.json` | OpenAPI 3.1 spec, JSON |
+| `<root>/openapi.yaml` | OpenAPI 3.1 spec, YAML |
+| `<root>/docs` | Interactive docs (Stoplight Elements by default) |
+| `<root>/schemas/<TypeName>.json` | Individual JSON Schemas, referenced by the `$schema` field auto-injected into response bodies |
+
+The root is wherever the adapter is mounted. If `humachi.New` is called inside `r.Group(func(v2 chi.Router) { ... })` with v2 routes registered at `/v2/...`, the docs URL is `/v2/docs`. The `$schema` URL on response bodies follows the same prefix — useful for clients that fetch schemas dynamically to validate responses, less so when the doc is private and the schema URL leaks the host externally.
+
+To customize the docs renderer:
+```go
+cfg.DocsPath = "/api-docs" // override default "/docs"
 ```
 
 ## Response Streaming
