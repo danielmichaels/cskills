@@ -1,0 +1,30 @@
+{
+  "skill_name": "river",
+  "note": "Prompt-only scaffold for future benchmarking. No assertions/harness run yet (skill was built by-feel).",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I'm adding a feature where creating an Order should send a confirmation email in the background using River. Wire up the job args, worker, and the enqueue in my Postgres handler. Make sure a rolled-back order never sends an email.",
+      "expected_output": "Enqueues via InsertTx in the same pgx.Tx as the order write; SendEmailArgs carries the order ID not the whole object; worker re-fetches; idempotent send.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "I want to use River with SQLite in a small single-binary tool, and I'd like the River UI dashboard available too. How do I set up the client and run the UI in Docker?",
+      "expected_output": "riversqlite.New(db) with SetMaxOpenConns(1)+PollOnly; River UI embedded via riverui.NewHandler (standalone image is Postgres-only); Dockerfile with DB file as a volume.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Our River jobs are sometimes running twice and double-charging customers. Why, and how do I fix it?",
+      "expected_output": "Explains at-least-once delivery (not a bug); fix is idempotency — idempotency key from job.ID, check-then-act, or DB constraint. Does not suggest exactly-once is achievable.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "Add a periodic job that recomputes tenant rollup stats every 5 minutes, and make sure two enqueues of the same refresh collapse into one.",
+      "expected_output": "river.NewPeriodicJob with PeriodicInterval(5m) + RunOnStart; UniqueOpts{ByArgs:true}; notes periodic jobs are leader-only/in-memory.",
+      "files": []
+    }
+  ]
+}
