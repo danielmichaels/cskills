@@ -15,7 +15,7 @@ import (
 	"github.com/danielmichaels/cskills/internal"
 )
 
-var supportedLangs = []string{"go", "rust"}
+var supportedLangs = []string{"go", "rust", "generic"}
 
 var version = "dev"
 

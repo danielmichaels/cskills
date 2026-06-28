@@ -55,6 +55,7 @@ error: unknown skill "foo" for go (available: datastar, plan-task, research-task
 | plan-task | go, rust | always | Design an implementation plan for a researched task |
 | implement-task | go, rust | always | Execute a planned task by spawning an agent team from todos.md |
 | datastar | go | custom | Best practices for building web apps with the Datastar hypermedia framework |
+| woodpecker | generic | custom | Woodpecker CI v2 schema, common gotchas, and patterns for self-hosted pipelines |
 
 ### Skill categories
 
@@ -63,7 +64,7 @@ error: unknown skill "foo" for go (available: datastar, plan-task, research-task
 
 ## Adding skills
 
-Create a new directory under `<lang>/skills/<name>/` with a `SKILL.md` file containing frontmatter:
+Create a new directory under `<lang>/skills/<name>/` with a `SKILL.md` file containing frontmatter. Use `generic` for skills that aren't language-specific (e.g. CI, infrastructure):
 
 ```markdown
 ---
