@@ -1,0 +1,31 @@
+# Task wiring for an embedded-Postgres project. Merge into an existing
+# Taskfile; `clean` and `clean:pg` are the two that matter.
+
+version: '3'
+
+tasks:
+  clean:pg:
+    desc: 'Remove embedded-Postgres temp dirs left by killed test runs. Dirs whose postmaster is still alive are reported, not touched — run `task clean:pg FORCE=1` to stop those too.'
+    cmds:
+      # Deliberately /bin/sh, not Task's built-in shell: the `kill -0`
+      # liveness guard does not behave the same there, and getting it wrong
+      # deletes the data directory of a running instance.
+      - sh scripts/clean-pg.sh
+
+  clean:
+    desc: 'Delete the persistent dev data dir and build output so the next `task dev` migrates a fresh database. Stop `task dev` first.'
+    vars:
+      # Must match the app's own default for the data dir.
+      PG_DIR: '{{.EMBEDDED_POSTGRES_DIR | default "./.data/postgres"}}'
+    cmds:
+      - |
+        case "{{.PG_DIR}}" in
+          ""|/|.|./|..|../) echo "refusing to remove '{{.PG_DIR}}'" >&2; exit 1 ;;
+        esac
+        rm -rf "{{.PG_DIR}}" bin tmp/main
+        echo "removed {{.PG_DIR}}, bin/ and tmp/main"
+
+  test:
+    desc: Run all tests (embedded Postgres starts automatically; no local DB needed)
+    cmds:
+      - go test ./... {{.CLI_ARGS}}
