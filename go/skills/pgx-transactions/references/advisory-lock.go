@@ -8,6 +8,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pressly/goose/v3"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivermigrate"
 )
 
 // AdvisoryLockKey namespaces the process-wide locks this application takes.
@@ -78,6 +80,56 @@ func MigrateUp(ctx context.Context, dsn string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("store.MigrateUp: run migrations: %w", err)
+	}
+	return nil
+}
+
+// WithAdvisoryLockPool is WithAdvisoryLock for callers holding a pgx pool.
+//
+// It dials a connection of its own rather than borrowing one from pool. fn
+// generally works on that same pool — River's migrator does — and a lock held
+// on a pooled connection for fn's whole duration can exhaust the pool and
+// deadlock the very caller it is protecting.
+func WithAdvisoryLockPool(ctx context.Context, pool *pgxpool.Pool, key AdvisoryLockKey, fn func(context.Context) error) error {
+	// Config() hands back a deep copy, so dialling from it cannot disturb the
+	// pool's own configuration.
+	conn, err := pgx.ConnectConfig(ctx, pool.Config().ConnConfig)
+	if err != nil {
+		return fmt.Errorf("store: dial connection for advisory lock: %w", err)
+	}
+	defer conn.Close(context.WithoutCancel(ctx))
+
+	if _, err := conn.Exec(ctx, "SET lock_timeout = '"+advisoryLockTimeout+"'"); err != nil {
+		return fmt.Errorf("store: set lock timeout: %w", err)
+	}
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(key)); err != nil {
+		return fmt.Errorf("store: acquire advisory lock %d: %w", key, err)
+	}
+	defer func() {
+		//nolint:errcheck // The lock also releases when this session ends.
+		conn.Exec(context.WithoutCancel(ctx), "SELECT pg_advisory_unlock($1)", int64(key))
+	}()
+
+	return fn(ctx)
+}
+
+// MigrateRiver is the other half of the boot-time migration story. River owns
+// its queue tables and migrates them at client construction under no lock of
+// its own, so an app that locks only goose still has replicas colliding on
+// river_migration. One key covers both migrators: the replica that arrives
+// second waits once, then finds nothing to do in either.
+func MigrateRiver(ctx context.Context, pool *pgxpool.Pool) error {
+	migrator, err := rivermigrate.New(riverpgxv5.New(pool), nil)
+	if err != nil {
+		return fmt.Errorf("store.MigrateRiver: create migrator: %w", err)
+	}
+
+	err = WithAdvisoryLockPool(ctx, pool, AdvisoryLockMigration, func(ctx context.Context) error {
+		_, err := migrator.Migrate(ctx, rivermigrate.DirectionUp, nil)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("store.MigrateRiver: run migrations: %w", err)
 	}
 	return nil
 }

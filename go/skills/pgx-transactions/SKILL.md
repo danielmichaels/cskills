@@ -161,6 +161,19 @@ kills the whole transaction rather than one statement.
 does not fit goose: goose runs its own transaction per migration and cannot be
 wrapped in one. That is the single most common mis-port of this pattern.
 
+**Lock every migrator, not just goose.** River owns its queue tables and
+migrates them itself at client construction, under no lock of its own, so an
+app that locks `goose.Up` and leaves `rivermigrate` bare still loses the race —
+replicas booting together fail with `relation "river_migration" already exists`
+(42P07) and a duplicate key on `river_migration_version_idx` (23505), and every
+replica but one fails to boot. A rolling restart turns that into a crash loop.
+The same goes for any library that migrates its own schema on startup.
+
+When taking the lock for a migrator that works on a `*pgxpool.Pool`, dial a
+separate connection rather than borrowing one from that pool. The lock is held
+for the whole migration, and a small pool can be exhausted by the very work the
+lock is protecting.
+
 Session-scoped rules:
 
 - **Pin the connection** with `db.Conn(ctx)`. `pg_advisory_unlock` only
@@ -208,6 +221,7 @@ A crashed holder always releases: the lock dies with its backend.
 | Boot hangs forever, no log output | `pg_advisory_lock` with no `lock_timeout`, waiting on a peer. |
 | Advisory lock never releases | Unlock ran on a different pooled connection, or on a cancelled context. |
 | Two replicas both run migrations, one errors | No advisory lock around `goose.Up`. |
+| `river_migration` "already exists" (42P07) or duplicate key (23505) on boot | `rivermigrate` left unlocked because only goose was wrapped. |
 | Work inside a "nested" tx vanishes | Savepoint nesting under an outer rollback — join instead (principle 5). |
 
 ## Testing the helpers
@@ -245,7 +259,8 @@ layer for this — the entire subject is real transactional semantics.
   that owns your sqlc output; `EnsureTx` type-asserts the unexported `db` field
   on `Queries` and can only compile there.
 - `references/advisory-lock.go` — `AdvisoryLockKey`, session-scoped
-  `WithAdvisoryLock` with the goose caller, plus the transaction-scoped variant.
+  `WithAdvisoryLock` with the goose caller, `WithAdvisoryLockPool` with the
+  River-migrator caller, plus the transaction-scoped variant.
 - `references/tx_test.go` — the full suite described above.
 
 ## Style notes for using this skill

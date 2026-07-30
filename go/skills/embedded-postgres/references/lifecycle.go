@@ -67,16 +67,23 @@ func (o *Options) applyDefaults() error {
 	return nil
 }
 
-// stableBinDir returns the shared, stable extraction dir. Setting
-// BinariesPath to this path prevents concurrent Start() calls from deleting
-// each other's extracted files (the default RuntimePath is also this dir
-// and is rm-rf'd on every Start).
-func stableBinDir() (string, error) {
+// stableBinDir returns the shared extraction dir for version. Setting
+// BinariesPath to a stable path prevents concurrent Start() calls from
+// deleting each other's extracted files (the default RuntimePath is also
+// this dir and is rm-rf'd on every Start).
+//
+// The path carries the version because the library skips extraction whenever
+// bin/pg_ctl already exists there, whatever version it happens to be. One
+// unversioned directory therefore lets whichever version extracted first
+// serve every request: initdb writes that version's PG_VERSION, the next
+// start compares it against the version actually asked for, decides the data
+// directory belongs to something else, and silently deletes the cluster.
+func stableBinDir(version embeddedpostgres.PostgresVersion) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("embeddedpg: home dir: %w", err)
 	}
-	return filepath.Join(home, ".embedded-postgres-go", "extracted"), nil
+	return filepath.Join(home, ".embedded-postgres-go", "extracted", string(version)), nil
 }
 
 // portInUse reports whether something already accepts connections on port.
@@ -143,7 +150,7 @@ func Start(opts Options) (*Server, error) {
 		runtimeDir, ownedRuntimeDir = tmp, tmp
 	}
 
-	binDir, err := stableBinDir()
+	binDir, err := stableBinDir(opts.Version)
 	if err != nil {
 		if ownedDataDir != "" {
 			os.RemoveAll(ownedDataDir) //nolint:errcheck

@@ -55,9 +55,16 @@ cannot depend on it.
    Deleting a user-supplied dev data dir on an error path destroys their
    database.
 
-7. **Pin the binaries directory.** Point `BinariesPath` at a stable location
-   (`~/.embedded-postgres-go`) so every run and every project reuses one
-   extraction instead of re-downloading.
+7. **Pin the binaries directory, and put the version in the path.** Point
+   `BinariesPath` at `~/.embedded-postgres-go/extracted/<version>` so every run
+   reuses one extraction instead of re-downloading — but never share one
+   directory across versions. The library skips extraction whenever
+   `bin/pg_ctl` exists there and never checks which version it is, so an
+   unversioned path silently runs whichever major extracted first. `initdb`
+   then stamps *that* version into `PG_VERSION`, and the next start compares it
+   against the version you asked for, decides the data directory is foreign,
+   and deletes it. Two projects on different majors quietly wipe each other's
+   dev database on every restart, with nothing logged.
 
 8. **Give each instance its own `RuntimePath`.** Parallel packages otherwise
    race on extraction. But see principle 6 — a *persistent* instance should get
@@ -110,6 +117,9 @@ away casually.
 - Tests calling `t.Parallel()` while sharing one database without truncation
   discipline — they will flake.
 - A fixed port in tests → collisions when packages run in parallel.
+- A `BinariesPath` with no version segment → see principle 7. Grep for it: any
+  project sharing `~/.embedded-postgres-go/extracted` with a project on a
+  different major loses its dev database on every restart.
 
 ## Debug mode — symptom → cause
 
@@ -121,6 +131,7 @@ away casually.
 | `Stop()` returns nil, process still alive | `pg_ctl stop` lying. Read `postmaster.pid` first, then poll + SIGKILL. |
 | Data dir deleted under a running instance | A cleanup that checked liveness incorrectly. See the warning below. |
 | Dev database empty after a clean | Data dir lived inside the watcher's scratch dir. |
+| Dev database empty after *every* restart, nothing logged | `BinariesPath` shared across versions, so the running major does not match `PG_VERSION` and the data dir is deleted as foreign. Check what `<binariesPath>/bin/postgres --version` actually prints. |
 | Migrations don't re-run after editing one | Goose recorded the version. Editing an applied migration is a no-op — wipe the dev dir or add a new migration. |
 
 ## The liveness check that must be right
