@@ -74,10 +74,24 @@ cannot depend on it.
    use `air` (`tmp_dir = "tmp"`), putting the database in `tmp/` means a stray
    clean deletes it. Use `./.data/postgres`.
 
-10. **Adopt a live instance instead of failing.** For persistent dev use, if
-    the port is already occupied, return a handle to the running instance
-    rather than erroring. Make `Stop()` on such a handle a no-op — you did not
+10. **Adopt a live instance instead of failing — but only one you can prove is
+    yours.** For persistent dev use, an occupied port is normal: air SIGKILLs
+    the app on reload, so Postgres routinely outlives the process that started
+    it, and refusing outright breaks `task dev` on every save. Return a handle
+    to the running instance, and make `Stop()` on it a no-op — you did not
     start it, so you must not stop it.
+
+    Adopting *blindly* is the trap. Read `postmaster.pid` first: line 2 is the
+    data directory and line 4 is the port, so you can confirm the occupant is
+    the postmaster for **this** data dir without opening a connection. Anything
+    else must be a hard error naming the port.
+
+    Two projects defaulting to the same port is all it takes. The lucky version
+    is a confusing `FATAL: database "x" does not exist`. The unlucky version is
+    two checkouts of one project — same slug, so same database name — where
+    adoption succeeds and migrations run into the *other* checkout's database,
+    reporting nothing. Derive the dev port per project so this is rare, and
+    keep the check so it is loud.
 
 ## Decision tree — which testing approach?
 
@@ -120,6 +134,11 @@ away casually.
 - A `BinariesPath` with no version segment → see principle 7. Grep for it: any
   project sharing `~/.embedded-postgres-go/extracted` with a project on a
   different major loses its dev database on every restart.
+- Adoption on `portInUse` alone, with no `postmaster.pid` check → principle 10.
+  The tell is a `Start` that builds a DSN and returns it without ever
+  establishing what is on the other end.
+- A dev port that is the same literal in every project generated from one
+  template → guarantees the collision principle 10 describes.
 
 ## Debug mode — symptom → cause
 
@@ -132,6 +151,8 @@ away casually.
 | Data dir deleted under a running instance | A cleanup that checked liveness incorrectly. See the warning below. |
 | Dev database empty after a clean | Data dir lived inside the watcher's scratch dir. |
 | Dev database empty after *every* restart, nothing logged | `BinariesPath` shared across versions, so the running major does not match `PG_VERSION` and the data dir is deleted as foreign. Check what `<binariesPath>/bin/postgres --version` actually prints. |
+| `FATAL: database "x" does not exist` on a dev boot that has worked before | The port was adopted from a *different* project's postmaster. `lsof -nP -iTCP:<port> -sTCP:LISTEN` then check that pid's `-D` argument. |
+| Tables from another project appear in this one's database | Same cause, but the database names matched, so adoption succeeded silently. See principle 10. |
 | Migrations don't re-run after editing one | Goose recorded the version. Editing an applied migration is a no-op — wipe the dev dir or add a new migration. |
 
 ## The liveness check that must be right
